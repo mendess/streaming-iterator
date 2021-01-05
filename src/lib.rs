@@ -160,7 +160,7 @@ pub trait StreamingIterator {
         Self: Sized,
         F: FnMut(&Self::Item) -> bool,
     {
-        Filter { it: self, f: f }
+        Filter { it: self, f }
     }
 
     /// Creates an iterator which both filters and maps by applying a closure to elements.
@@ -172,7 +172,7 @@ pub trait StreamingIterator {
     {
         FilterMap {
             it: self,
-            f: f,
+            f,
             item: None,
         }
     }
@@ -260,7 +260,7 @@ pub trait StreamingIterator {
     {
         Map {
             it: self,
-            f: f,
+            f,
             item: None,
         }
     }
@@ -284,7 +284,7 @@ pub trait StreamingIterator {
         Self: Sized,
         F: Fn(&Self::Item) -> &B,
     {
-        MapRef { it: self, f: f }
+        MapRef { it: self, f }
     }
 
     /// Consumes the first `n` elements of the iterator, returning the next one.
@@ -338,7 +338,7 @@ pub trait StreamingIterator {
     where
         Self: Sized,
     {
-        Skip { it: self, n: n }
+        Skip { it: self, n }
     }
 
     /// Creates an iterator that skips initial elements matching a predicate.
@@ -350,7 +350,7 @@ pub trait StreamingIterator {
     {
         SkipWhile {
             it: self,
-            f: f,
+            f,
             done: false,
         }
     }
@@ -363,7 +363,7 @@ pub trait StreamingIterator {
     {
         Take {
             it: self,
-            n: n,
+            n,
             done: false,
         }
     }
@@ -377,7 +377,7 @@ pub trait StreamingIterator {
     {
         TakeWhile {
             it: self,
-            f: f,
+            f,
             done: false,
         }
     }
@@ -507,6 +507,33 @@ pub trait DoubleEndedStreamingIterator: StreamingIterator {
     }
 }
 
+/// A streaming iterator that knows its exact length.
+///
+/// This trait is equivalent to the [`ExactSizeIterator`] from `std`.
+///
+/// [`ExactSizeIterator`]: ExactSizeIterator
+pub trait ExactSizeStreamingIterator: StreamingIterator {
+    /// Returns the exact length of the iterator.
+    ///
+    /// The implementation ensures that the iterator will return exactly `len()`
+    /// more times a [`Some(T)`] value, before returning [`None`].
+    /// This method has a default implementation, so you usually should not
+    /// implement it directly. However, if you can provide a more efficient
+    /// implementation, you can do so. See the [trait-level] docs for an
+    /// example.
+    ///
+    /// This function has the same safety guarantees as the
+    /// [`StreamingIterator::size_hint`] function.
+    ///
+    /// [`trait-level`]: ExactSizeStreamingIterator
+    /// [`Some(T)`]: Some
+    fn len(&self) -> usize {
+        let (lower, upper) = self.size_hint();
+        assert_eq!(Some(lower), upper);
+        lower
+    }
+}
+
 /// Turns a normal, non-streaming iterator into a streaming iterator.
 ///
 /// ```
@@ -553,11 +580,22 @@ impl<I> StreamingIterator for Empty<I> {
     fn get(&self) -> Option<&Self::Item> {
         None
     }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, Some(0))
+    }
 }
 
 impl<I> DoubleEndedStreamingIterator for Empty<I> {
     #[inline]
     fn advance_back(&mut self) {}
+}
+
+impl<I> ExactSizeStreamingIterator for Empty<I> {
+    fn len(&self) -> usize {
+        0
+    }
 }
 
 /// Creates an empty iterator
@@ -640,6 +678,19 @@ where
         }
         accum
     }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let (lower_a, upper_a) = self.a.size_hint();
+        let (lower_b, upper_b) = self.b.size_hint();
+        let upper = match (upper_a, upper_b) {
+            (Some(a), Some(b)) => a.saturating_add(b),
+            (Some(a), None) => a,
+            (None, Some(b)) => b,
+            (None, None) => 0,
+        };
+        (lower_a.saturating_add(lower_b), Some(upper))
+    }
 }
 
 impl<A, B> DoubleEndedStreamingIterator for Chain<A, B>
@@ -684,6 +735,18 @@ where
     }
 }
 
+impl<A, B> ExactSizeStreamingIterator for Chain<A, B>
+where
+    A: ExactSizeStreamingIterator,
+    B: ExactSizeStreamingIterator,
+    Self: StreamingIterator,
+{
+    #[inline]
+    fn len(&self) -> usize {
+        self.a.len().saturating_add(self.b.len())
+    }
+}
+
 /// A normal, non-streaming, iterator which converts the elements of a streaming iterator into owned
 /// values by cloning them.
 #[derive(Clone, Debug)]
@@ -724,6 +787,16 @@ where
     #[inline]
     fn next_back(&mut self) -> Option<I::Item> {
         self.0.next_back().map(Clone::clone)
+    }
+}
+
+impl<I> ExactSizeStreamingIterator for Cloned<I>
+where I: ExactSizeStreamingIterator,
+      Self: StreamingIterator,
+{
+    #[inline]
+    fn len(&self) -> usize {
+        self.0.len()
     }
 }
 
@@ -792,6 +865,17 @@ where
     }
 }
 
+impl<I> ExactSizeStreamingIterator for Convert<I>
+where
+    I: ExactSizeIterator,
+    Self: StreamingIterator,
+{
+    #[inline]
+    fn len(&self) -> usize {
+        self.it.len()
+    }
+}
+
 /// A streaming iterator which yields elements from an iterator of references.
 #[derive(Clone, Debug)]
 pub struct ConvertRef<'a, I, T: ?Sized>
@@ -855,6 +939,17 @@ where
         Fold: FnMut(Acc, &Self::Item) -> Acc,
     {
         self.it.rev().fold(init, move |acc, item| f(acc, item))
+    }
+}
+
+impl<'a, I, T: ?Sized> ExactSizeStreamingIterator for ConvertRef<'a, I, T>
+where
+    I: ExactSizeIterator<Item = &'a T>,
+    Self: StreamingIterator,
+{
+    #[inline]
+    fn len(&self) -> usize {
+        self.it.len()
     }
 }
 
@@ -1236,6 +1331,18 @@ where
         }
     }
 }
+
+impl<I> ExactSizeStreamingIterator for Fuse<I>
+where
+    I: ExactSizeStreamingIterator,
+    Self: StreamingIterator,
+{
+    #[inline]
+    fn len(&self) -> usize {
+        self.it.len()
+    }
+}
+
 /// A streaming iterator that calls a function with element before yielding it.
 #[derive(Debug)]
 pub struct Inspect<I, F> {
@@ -1303,6 +1410,17 @@ where
     }
 }
 
+impl<I, F> ExactSizeStreamingIterator for Inspect<I, F>
+where
+    I: ExactSizeStreamingIterator,
+    Self: StreamingIterator,
+{
+    #[inline]
+    fn len(&self) -> usize {
+        self.it.len()
+    }
+}
+
 /// A streaming iterator which transforms the elements of a streaming iterator.
 #[derive(Debug)]
 pub struct Map<I, B, F> {
@@ -1365,6 +1483,17 @@ where
     }
 }
 
+impl<I, B, F> ExactSizeStreamingIterator for Map<I, B, F>
+where
+    I: ExactSizeStreamingIterator,
+    Self: StreamingIterator,
+{
+    #[inline]
+    fn len(&self) -> usize {
+        self.it.len()
+    }
+}
+
 /// A regular, non-streaming iterator which transforms the elements of a streaming iterator.
 #[derive(Debug)]
 pub struct MapDeref<I, F> {
@@ -1411,6 +1540,17 @@ where
     }
 }
 
+impl<I, F> ExactSizeStreamingIterator for MapDeref<I, F>
+where
+    I: ExactSizeStreamingIterator,
+    Self: StreamingIterator,
+{
+    #[inline]
+    fn len(&self) -> usize {
+        self.it.len()
+    }
+}
+
 /// A streaming iterator which transforms the elements of a streaming iterator.
 #[derive(Debug)]
 pub struct MapRef<I, F> {
@@ -1453,6 +1593,17 @@ where
     {
         let f = self.f;
         self.it.fold(init, move |acc, item| fold(acc, f(item)))
+    }
+}
+
+impl<I, F> ExactSizeStreamingIterator for MapRef<I, F>
+where
+    I: ExactSizeStreamingIterator,
+    Self: StreamingIterator,
+{
+    #[inline]
+    fn len(&self) -> usize {
+        self.it.len()
     }
 }
 
@@ -1504,6 +1655,18 @@ where
     }
 }
 
+#[cfg(feature = "std")]
+impl<I> ExactSizeStreamingIterator for Owned<I>
+where
+    I: ExactSizeStreamingIterator,
+    Self: StreamingIterator,
+{
+    #[inline]
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
 /// A streaming iterator which skips a number of elements in a streaming iterator.
 #[derive(Clone, Debug)]
 pub struct Skip<I> {
@@ -1550,6 +1713,17 @@ where
             }
         }
         self.it.fold(init, fold)
+    }
+}
+
+impl<I> ExactSizeStreamingIterator for Skip<I>
+where
+    I: ExactSizeStreamingIterator,
+    Self: StreamingIterator
+{
+    #[inline]
+    fn len(&self) -> usize {
+        self.it.len().saturating_sub(self.n)
     }
 }
 
@@ -1643,6 +1817,17 @@ where
     fn size_hint(&self) -> (usize, Option<usize>) {
         let hint = self.it.size_hint();
         (cmp::min(hint.0, self.n), Some(self.n))
+    }
+}
+
+impl<I> ExactSizeStreamingIterator for Take<I>
+where
+    I: ExactSizeStreamingIterator,
+    Self: StreamingIterator,
+{
+    #[inline]
+    fn len(&self) -> usize {
+        cmp::min(self.n, self.it.len())
     }
 }
 
@@ -1770,6 +1955,17 @@ where
         Fold: FnMut(Acc, &Self::Item) -> Acc,
     {
         self.0.fold(init, f)
+    }
+}
+
+impl<I> ExactSizeStreamingIterator for Rev<I>
+where
+    I: ExactSizeStreamingIterator,
+    Self: StreamingIterator,
+{
+    #[inline]
+    fn len(&self) -> usize {
+        self.0.len()
     }
 }
 
@@ -2096,7 +2292,7 @@ mod test {
         test(it.clone().take_while(|&i| i < 5), &[0, 1, 2, 3]);
     }
 
-    fn _is_object_safe(_: &StreamingIterator<Item = ()>) {}
+    fn _is_object_safe(_: &dyn StreamingIterator<Item = ()>) {}
 
     #[test]
     fn empty_iterator() {
